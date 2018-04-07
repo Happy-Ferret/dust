@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use std::fs;
+use std::thread;
 
 use dust::Node;
 use std::path::Path;
@@ -10,11 +11,10 @@ use self::platform::*;
 
 pub fn get_dir_tree(filenames: &Vec<&str>, apparent_size: bool) -> (bool, Vec<Node>) {
     let mut permissions = true;
-    let mut inodes: HashSet<(u64, u64)> = HashSet::new();
     let mut results = vec![];
     for &b in filenames {
         let filename = strip_end_slashes(b);
-        let (hp, data) = examine_dir(&Path::new(&filename), apparent_size, &mut inodes);
+        let (hp, data) = examine_dir(&Path::new(&filename), apparent_size);
         permissions = permissions && hp;
         match data {
             Some(d) => results.push(d),
@@ -32,14 +32,11 @@ fn strip_end_slashes(s: &str) -> String {
     new_name
 }
 
-fn examine_dir(
-    sdir: &Path,
-    apparent_size: bool,
-    inodes: &mut HashSet<(u64, u64)>,
-) -> (bool, Option<Node>) {
+fn examine_dir(sdir: &Path, apparent_size: bool) -> (bool, Option<Node>) {
     match fs::read_dir(sdir) {
         Ok(file_iter) => {
             let mut result = vec![];
+            let mut threads = vec![];
             let mut have_permission = true;
             let mut total_size = 0;
 
@@ -51,27 +48,14 @@ fn examine_dir(
 
                         match (file_type, maybe_size_and_inode) {
                             (Some(file_type), Some((size, maybe_inode))) => {
-                                if !apparent_size {
-                                    if let Some(inode_dev_pair) = maybe_inode {
-                                        if inodes.contains(&inode_dev_pair) {
-                                            continue;
-                                        }
-                                        inodes.insert(inode_dev_pair);
-                                    }
-                                }
                                 total_size += size;
 
                                 if d.path().is_dir() && !file_type.is_symlink() {
-                                    let (hp, child) = examine_dir(&d.path(), apparent_size, inodes);
-                                    have_permission = have_permission && hp;
-
-                                    match child {
-                                        Some(c) => {
-                                            total_size += c.size();
-                                            result.push(c);
-                                        }
-                                        None => (),
-                                    }
+                                    threads.push(thread::spawn(move || -> Option<Node> {
+                                        let (hp, child) = examine_dir(&d.path(), apparent_size);
+                                        have_permission = have_permission && hp;
+                                        child
+                                    }));
                                 } else {
                                     let path_name = d.path().to_string_lossy().to_string();
                                     result.push(Node::new(path_name, size, vec![]))
@@ -82,6 +66,15 @@ fn examine_dir(
                         }
                     }
                     Err(_) => (),
+                }
+            }
+            for t in threads {
+                match t.join().unwrap() {
+                    Some(c) => {
+                        total_size += c.size();
+                        result.push(c);
+                    }
+                    None => (),
                 }
             }
             let n = Node::new(sdir.to_string_lossy().to_string(), total_size, result);
