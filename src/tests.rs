@@ -48,6 +48,15 @@ fn main_output() -> String {
 }
 
 #[test]
+pub fn test_main_extra_slash() {
+    assert_cli::Assert::main_binary()
+        .with_args(&["src/test_dir/"])
+        .stdout()
+        .is(main_output())
+        .unwrap();
+}
+
+#[test]
 pub fn test_apparent_size() {
     let r = format!(
         "{}",
